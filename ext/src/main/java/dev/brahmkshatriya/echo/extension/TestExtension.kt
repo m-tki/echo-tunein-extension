@@ -18,6 +18,8 @@ import dev.brahmkshatriya.echo.common.models.Streamable.Source.Companion.toSourc
 import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.common.settings.Setting
 import dev.brahmkshatriya.echo.common.settings.Settings
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import kotlinx.serialization.Serializable
@@ -59,12 +61,14 @@ class TestExtension : ExtensionClient, HomeFeedClient, TrackClient, RadioClient,
         setting = settings
     }
 
-    private val apiLink = "https://opml.radiotime.com/"
+    private val apiLink = "https://opml.radiotime.com"
 
     private val client by lazy { OkHttpClient.Builder().build() }
-    private suspend fun call(url: String) = client.newCall(
-        Request.Builder().url(url).build()
-    ).await().body.string()
+    private suspend fun call(url: String): String = withContext(Dispatchers.IO) {
+        client.newCall(
+            Request.Builder().url(url).build()
+        ).await().body.string()
+    }
 
     private val json by lazy {
         Json {
@@ -128,8 +132,7 @@ class TestExtension : ExtensionClient, HomeFeedClient, TrackClient, RadioClient,
         PagedData.Single {
             val fullUrl = if (url.contains("?")) "$url&render=json"
                 else "$url?render=json"
-            call(fullUrl.replace("http://", "https://"))
-                .toShelf()
+            call(fullUrl).toShelf()
         }.toFeed()
 
     override suspend fun loadHomeFeed(): Feed<Shelf> =
@@ -216,17 +219,21 @@ class TestExtension : ExtensionClient, HomeFeedClient, TrackClient, RadioClient,
             Shelf.Lists.Items(
                 "search_stations",
                 "Stations",
-                stationTracks
+                stationTracks.take(12),
+                more = stationTracks.takeIf { stationTracks.size > 12 }?.map { it.toShelf() }?.toFeed()
             ).takeUnless { stationTracks.isEmpty() },
             Shelf.Lists.Categories(
                 "search_podcasts",
                 "Podcasts",
-                linkShelves
+                linkShelves.take(6),
+                more = linkShelves.takeIf { linkShelves.size > 6 }?.toFeed(),
+                type = Shelf.Lists.Type.Grid
             ).takeUnless { linkShelves.isEmpty() },
             Shelf.Lists.Tracks(
                 "search_tracks",
                 "Tracks",
-                otherTracks
+                otherTracks.take(18),
+                more = otherTracks.takeIf { otherTracks.size > 18 }?.map { it.toShelf() }?.toFeed()
             ).takeUnless { otherTracks.isEmpty() }
         )
     }
@@ -244,5 +251,5 @@ class TestExtension : ExtensionClient, HomeFeedClient, TrackClient, RadioClient,
     }
 
     override suspend fun loadSearchFeed(query: String): Feed<Shelf> =
-        call("${apiLink}Search.ashx?query=$query&render=json").toSearchShelf()
+        call("${apiLink}/Search.ashx?query=$query&render=json").toSearchShelf()
 }
