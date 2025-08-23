@@ -160,8 +160,8 @@ class TestExtension : ExtensionClient, HomeFeedClient, TrackClient, RadioClient,
 
     private fun urlExtension(url: String, ext: String) =
         url.endsWith(".$ext", true) ||
-                url.substringAfterLast('.').take(ext.length + 1)
-                    .equals("$ext?", true)
+                url.substringBefore('?')
+                    .endsWith(".$ext", true)
 
     private suspend fun parsePLS(stream: String?): String {
         if (stream != null) {
