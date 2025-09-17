@@ -82,6 +82,11 @@ class TestExtension : ExtensionClient, HomeFeedClient, TrackClient, RadioClient,
         return json.decodeFromJsonElement(MediaItem.serializer(), jsonObject)
     }
 
+    private fun parseMediaItemOrNull(jsonObject: JsonObject?): MediaItem? {
+        if (jsonObject == null) return null
+        return parseMediaItem(jsonObject)
+    }
+
     private fun processMediaItem(item: MediaItem): List<Shelf> {
         return when (item.type) {
             "audio" -> listOf(createAudioShelf(item).toShelf())
@@ -128,30 +133,59 @@ class TestExtension : ExtensionClient, HomeFeedClient, TrackClient, RadioClient,
         }
     }
 
+    private fun String.toMediaItems(): List<EchoMediaItem> {
+        val response = json.decodeFromString<JsonResponse>(this)
+        return parseMediaItemOrNull(response.body.firstOrNull())?.children?.mapNotNull { item ->
+            if (item.type == "audio" && item.item == "station") {
+                createAudioShelf(item)
+            }
+            else null
+        } ?: emptyList()
+    }
+
+    private fun getFullUrl(url: String) =
+        if (url.contains("?")) "$url&render=json"
+        else "$url?render=json"
+
     private fun createShelf(url: String): Feed<Shelf> =
         PagedData.Single {
-            val fullUrl = if (url.contains("?")) "$url&render=json"
-                else "$url?render=json"
-            call(fullUrl).toShelf()
+            call(getFullUrl(url)).toShelf()
         }.toFeed()
 
-    override suspend fun loadHomeFeed(): Feed<Shelf> =
-        listOf(
+    override suspend fun loadHomeFeed(): Feed<Shelf> {
+        val body =
+            json.decodeFromString<JsonResponse>(call("$apiLink?render=json")).body
+        val firstItem = parseMediaItemOrNull(body.firstOrNull())
+        val local = if (firstItem != null && firstItem.key == "local") {
+            val items = call(getFullUrl(firstItem.url ?: "")).toMediaItems()
+            println(items.size)
+            Shelf.Lists.Items(
+                firstItem.key,
+                firstItem.text ?: "",
+                items.take(12),
+                more = items.takeIf { items.size > 12 }?.map { it.toShelf() }?.toFeed()
+            ).takeUnless { items.isEmpty() }
+        }
+        else null
+        val filteredBody = if (local == null) body
+        else body.drop(1)
+        return listOfNotNull(
+            local,
             Shelf.Lists.Categories(
-                "home",
-                "Home",
-                json.decodeFromString<JsonResponse>(call("$apiLink?render=json"))
-                    .body.map { jsonObject ->
-                        val item = parseMediaItem(jsonObject)
-                        Shelf.Category(
-                            item.key ?: "",
-                            item.text ?: "",
-                            createShelf(item.url ?: "")
-                        )
+                "categories",
+                "Categories",
+                filteredBody.map { jsonObject ->
+                    val item = parseMediaItem(jsonObject)
+                    Shelf.Category(
+                        item.key ?: "",
+                        item.text ?: "",
+                        createShelf(item.url ?: "")
+                    )
                 },
                 type = Shelf.Lists.Type.Grid
             )
-        ).toFeed()
+        ).toFeed(Feed.Buttons())
+    }
 
     override suspend fun loadFeed(track: Track): Feed<Shelf>? = null
 
@@ -195,7 +229,7 @@ class TestExtension : ExtensionClient, HomeFeedClient, TrackClient, RadioClient,
     override suspend fun loadRadio(radio: Radio): Radio  = Radio("", "")
     override suspend fun radio(item: EchoMediaItem, context: EchoMediaItem?): Radio = Radio("", "")
 
-    private fun processSearchMediaItem(item: MediaItem, stationTracks: MutableList<Track>, otherTracks: MutableList<Track>, linkShelves: MutableList<Shelf.Category>) {
+    private fun processSearchMediaItem(item: MediaItem, stationTracks: MutableList<Track>, otherTracks: MutableList<Track>, linkShelves: MutableList<Shelf.Category>, linkArtists: MutableList<Shelf.Category>) {
         when (item.type) {
             "audio" -> {
                 if (item.item == "station")
@@ -203,16 +237,21 @@ class TestExtension : ExtensionClient, HomeFeedClient, TrackClient, RadioClient,
                 else
                     otherTracks.add(createAudioShelf(item))
             }
-            "link" -> linkShelves.add(createLinkShelf(item) as Shelf.Category)
+            "link" -> {
+                if (item.text.orEmpty().startsWith("Artist: "))
+                    linkArtists.add(createLinkShelf(item.copy(text = item.text?.drop(8))) as Shelf.Category)
+                else
+                    linkShelves.add(createLinkShelf(item) as Shelf.Category)
+            }
             else -> {
                 item.children?.forEach { child ->
-                    processSearchMediaItem(child, stationTracks, otherTracks, linkShelves)
+                    processSearchMediaItem(child, stationTracks, otherTracks, linkShelves, linkArtists)
                 }
             }
         }
     }
 
-    private fun sortSearchShelf(stationTracks: List<Track>, otherTracks: List<Track>, linkShelves: List<Shelf.Category>): List<Shelf> {
+    private fun sortSearchShelf(stationTracks: List<Track>, otherTracks: List<Track>, linkShelves: List<Shelf.Category>, linkArtists: List<Shelf.Category>): List<Shelf> {
         return listOfNotNull(
             Shelf.Lists.Items(
                 "search_stations",
@@ -227,6 +266,13 @@ class TestExtension : ExtensionClient, HomeFeedClient, TrackClient, RadioClient,
                 more = linkShelves.takeIf { linkShelves.size > 6 }?.toFeed(),
                 type = Shelf.Lists.Type.Grid
             ).takeUnless { linkShelves.isEmpty() },
+            Shelf.Lists.Categories(
+                "search_artists",
+                "Artists",
+                linkArtists.take(6),
+                more = linkArtists.takeIf { linkArtists.size > 6 }?.toFeed(),
+                type = Shelf.Lists.Type.Grid
+            ).takeUnless { linkArtists.isEmpty() },
             Shelf.Lists.Tracks(
                 "search_tracks",
                 "Tracks",
@@ -241,11 +287,12 @@ class TestExtension : ExtensionClient, HomeFeedClient, TrackClient, RadioClient,
         val stationTracks = mutableListOf<Track>()
         val otherTracks = mutableListOf<Track>()
         val linkShelves = mutableListOf<Shelf.Category>()
+        val linkArtists = mutableListOf<Shelf.Category>()
         response.body.forEach { jsonObject ->
             val item = parseMediaItem(jsonObject)
-            processSearchMediaItem(item, stationTracks, otherTracks, linkShelves)
+            processSearchMediaItem(item, stationTracks, otherTracks, linkShelves, linkArtists)
         }
-        return sortSearchShelf(stationTracks, otherTracks, linkShelves).toFeed()
+        return sortSearchShelf(stationTracks, otherTracks, linkShelves, linkArtists).toFeed()
     }
 
     override suspend fun loadSearchFeed(query: String): Feed<Shelf> =
